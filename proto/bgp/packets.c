@@ -1195,6 +1195,18 @@ bgp_set_next_hop(struct bgp_proto *p, rta *a)
 
 #include <unistd.h>  // DAVID can be removed when sleep() is removed
 
+/**
+ * @brief handles route udpates
+ * @details [long description]
+ * 
+ * @param bgp_conn connection from which the updated was received
+ * @param withdrawn [description]
+ * @param withdrawn_len [description]
+ * @param nlri [description]
+ * @param nlri_len [description]
+ * @param attrs [description]
+ * @param attr_len [description]
+ */
 static void
 bgp_do_rx_update(struct bgp_conn *conn,
 		 byte *withdrawn, int withdrawn_len,
@@ -1218,25 +1230,26 @@ bgp_do_rx_update(struct bgp_conn *conn,
 
   /* Check for End-of-RIB marker */
   if (!withdrawn_len && !attr_len && !nlri_len)
-    {
-      bgp_rx_end_mark(p);
-      return;
-    }
+  {
+    bgp_rx_end_mark(p);
+    return;
+  }
 
   /* Withdraw routes */
   while (withdrawn_len)
-    {
-      DECODE_PREFIX(withdrawn, withdrawn_len);
-      DBG("Withdraw %I/%d\n", prefix, pxlen);
+  {
+    DECODE_PREFIX(withdrawn, withdrawn_len);
+    DBG("Withdraw %I/%d\n", prefix, pxlen);
 
-      bgp_rte_withdraw(p, prefix, pxlen, path_id, &last_id, &src);
-    }
+    bgp_rte_withdraw(p, prefix, pxlen, path_id, &last_id, &src);
+  }
 
   if (!attr_len && !nlri_len)		/* shortcut */
     return;
 
-  // !!! IPv4 version !!!
-
+  // Decodes the BGP attributes from the update message
+  // Aside from decoding attributes, this function also performs the loop detection
+  // using the bgp_as_path_loopy() function
   a0 = bgp_decode_attrs(conn, attrs, attr_len, bgp_linpool, nlri_len);
 
   if (conn->state != BS_ESTABLISHED)	/* fatal error during decoding */
@@ -1248,16 +1261,18 @@ bgp_do_rx_update(struct bgp_conn *conn,
   last_id = 0;
   src = p->p.main_source;
 
+  // An update message may refer to multiple prefixes
+  // Here we loop through each prefix and update the route table for each prefix
   while (nlri_len)
-    {
-      DECODE_PREFIX(nlri, nlri_len);
-      DBG("Add %I/%d\n", prefix, pxlen);
+  {
+    DECODE_PREFIX(nlri, nlri_len);
+    DBG("Add %I/%d\n", prefix, pxlen);
 
-      if (a0)
-	bgp_rte_update(p, prefix, pxlen, path_id, &last_id, &src, a0, &a);
-      else /* Forced withdraw as a result of soft error */
-	bgp_rte_withdraw(p, prefix, pxlen, path_id, &last_id, &src);
-    }
+    if (a0)
+      bgp_rte_update(p, prefix, pxlen, path_id, &last_id, &src, a0, &a);
+    else /* Forced withdraw as a result of soft error */
+      bgp_rte_withdraw(p, prefix, pxlen, path_id, &last_id, &src);
+  }
 
  done:
   if (a)
