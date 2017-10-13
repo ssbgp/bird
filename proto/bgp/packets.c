@@ -1193,6 +1193,8 @@ bgp_set_next_hop(struct bgp_proto *p, rta *a)
 
 #ifndef IPV6		/* IPv4 version */
 
+#include <unistd.h>  // DAVID can be removed when sleep() is removed
+
 static void
 bgp_do_rx_update(struct bgp_conn *conn,
 		 byte *withdrawn, int withdrawn_len,
@@ -1206,6 +1208,13 @@ bgp_do_rx_update(struct bgp_conn *conn,
   int pxlen, err = 0;
   u32 path_id = 0;
   u32 last_id = 0;
+
+  // DAVID Introduce some processing delay to instigate oscillations
+  sleep(1);
+
+  // DAVID The following was introduced for debugging purposes
+  u32 remote_as = p->remote_as;
+  BGP_TRACE(D_PACKETS, "Got UPDATE from AS%d", remote_as);
 
   /* Check for End-of-RIB marker */
   if (!withdrawn_len && !attr_len && !nlri_len)
@@ -1225,6 +1234,8 @@ bgp_do_rx_update(struct bgp_conn *conn,
 
   if (!attr_len && !nlri_len)		/* shortcut */
     return;
+
+  // !!! IPv4 version !!!
 
   a0 = bgp_decode_attrs(conn, attrs, attr_len, bgp_linpool, nlri_len);
 
@@ -1312,6 +1323,8 @@ bgp_do_rx_update(struct bgp_conn *conn,
 
   p->mp_reach_len = 0;
   p->mp_unreach_len = 0;
+
+  // !!! IPv6 version !!!
   a0 = bgp_decode_attrs(conn, attrs, attr_len, bgp_linpool, 0);
 
   if (conn->state != BS_ESTABLISHED)	/* fatal error during decoding */
