@@ -1719,7 +1719,7 @@ bgp_remove_as4_attrs(struct bgp_proto *p, rta *a)
  * by a &rta.
  */
 struct rta *
-bgp_decode_attrs(struct bgp_conn *conn, byte *attr, uint len, struct linpool *pool, int mandatory)
+bgp_decode_attrs(struct bgp_conn *conn, byte *attr, uint len, struct linpool *pool, int mandatory, int *loopy_path)
 {
   struct bgp_proto *bgp = conn->bgp;
   rta *a = lp_alloc(pool, sizeof(struct rta));
@@ -1730,6 +1730,7 @@ bgp_decode_attrs(struct bgp_conn *conn, byte *attr, uint len, struct linpool *po
   ea_list *ea;
   struct adata *ad;
   int withdraw = 0;
+  *loopy_path = 0;
 
   bzero(a, sizeof(rta));
   a->source = RTS_BGP;
@@ -1911,6 +1912,7 @@ bgp_decode_attrs(struct bgp_conn *conn, byte *attr, uint len, struct linpool *po
 
   /* If the AS path attribute contains our AS, reject the routes */
   if (bgp_as_path_loopy(bgp, a)) {
+    *loopy_path = 1;
     goto withdraw;
   }
 
