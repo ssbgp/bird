@@ -1296,6 +1296,14 @@ bgp_do_rx_update(struct bgp_conn *conn,
     DECODE_PREFIX(nlri, nlri_len);
     DBG("Add %I/%d\n", prefix, pxlen);
 
+    struct prefix pref = {prefix, pxlen};
+    if (prefix_set_contains(p->deactivated_prefixes, &pref)) {
+      BGP_TRACE(D_PACKETS, "DEACTIVATION Discarded update for %I/%d\n", prefix, pxlen);
+      continue;
+    }
+
+    BGP_TRACE(D_PACKETS, "DEACTIVATION prefix %I/%d is ok\n", prefix, pxlen);
+
     if (a0)
       bgp_rte_update(p, prefix, pxlen, path_id, &last_id, &src, a0, &a);
     else /* Forced withdraw as a result of soft error */
@@ -1315,9 +1323,15 @@ bgp_do_rx_update(struct bgp_conn *conn,
         // Get the local-pref of the elected route after the withdraw
         u32 new_local_pref = bgp_find_local_pref(p, n->routes);
 
+        BGP_TRACE(D_PACKETS, "DETECTION old LOCAL-PREF %d", old_local_pref);
+        BGP_TRACE(D_PACKETS, "DETECTION new LOCAL-PREF %d", new_local_pref);
+
         if (bgp_is_loop_recurrent(old_local_pref, new_local_pref)) 
         {
           BGP_TRACE(D_PACKETS, "DETECTION Detected recurrent loop");
+          
+          prefix_set_add(p->deactivated_prefixes, &pref);
+          BGP_TRACE(D_PACKETS, "DEACTIVATION Deactivated prefix %I/%d\n", prefix, pxlen);
         }
 
       }
