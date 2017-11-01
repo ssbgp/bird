@@ -1133,10 +1133,10 @@ bgp_rte_withdraw(struct bgp_proto *p, ip_addr prefix, int pxlen,
 		 u32 path_id, u32 *last_id, struct rte_src **src)
 {
   if (path_id != *last_id)
-    {
-      *src = rt_find_source(&p->p, path_id);
-      *last_id = path_id;
-    }
+  {
+    *src = rt_find_source(&p->p, path_id);
+    *last_id = path_id;
+  }
 
   net *n = net_find(p->p.table, prefix, pxlen);
   rte_update2( p->p.main_ahook, n, NULL, *src);
@@ -1191,8 +1191,47 @@ bgp_set_next_hop(struct bgp_proto *p, rta *a)
   return 1;
 }
 
+static u32
+bgp_find_local_pref(struct bgp_proto* bgp, rte *route) 
+{
+  u32 local_pref;
+  
+  if (!route) 
+  {
+    local_pref = 0;
+  } 
+  else 
+  {
+    eattr* x = ea_find(route->attrs->eattrs, EA_CODE(EAP_BGP, BA_LOCAL_PREF));
+    local_pref = x ? x->u.data : bgp->cf->default_local_pref;
+  }
+
+  return local_pref;
+}
+
+static int
+bgp_is_loop_recurrent(u32 old_local_pref, u32 new_local_pref) 
+{
+  return new_local_pref < old_local_pref;
+}
+
+
 #ifndef IPV6		/* IPv4 version */
 
+#include <unistd.h>  // DAVID can be removed when sleep() is removed
+
+/**
+ * @brief handles route udpates
+ * @details [long description]
+ * 
+ * @param bgp_conn connection from which the updated was received
+ * @param withdrawn [description]
+ * @param withdrawn_len [description]
+ * @param nlri [description]
+ * @param nlri_len [description]
+ * @param attrs [description]
+ * @param attr_len [description]
+ */
 static void
 bgp_do_rx_update(struct bgp_conn *conn,
 		 byte *withdrawn, int withdrawn_len,
@@ -1207,26 +1246,39 @@ bgp_do_rx_update(struct bgp_conn *conn,
   u32 path_id = 0;
   u32 last_id = 0;
 
+  // DAVID Introduce some processing delay to instigate oscillations
+  sleep(1);
+
+  // DAVID The following was introduced for debugging purposes
+  u32 remote_as = p->remote_as;
+  BGP_TRACE(D_PACKETS, "Got UPDATE from AS%d", remote_as);
+
   /* Check for End-of-RIB marker */
   if (!withdrawn_len && !attr_len && !nlri_len)
-    {
-      bgp_rx_end_mark(p);
-      return;
-    }
+  {
+    bgp_rx_end_mark(p);
+    return;
+  }
 
   /* Withdraw routes */
   while (withdrawn_len)
-    {
-      DECODE_PREFIX(withdrawn, withdrawn_len);
-      DBG("Withdraw %I/%d\n", prefix, pxlen);
+  {
+    DECODE_PREFIX(withdrawn, withdrawn_len);
+    DBG("Withdraw %I/%d\n", prefix, pxlen);
 
-      bgp_rte_withdraw(p, prefix, pxlen, path_id, &last_id, &src);
-    }
+    bgp_rte_withdraw(p, prefix, pxlen, path_id, &last_id, &src);
+  }
 
   if (!attr_len && !nlri_len)		/* shortcut */
     return;
 
-  a0 = bgp_decode_attrs(conn, attrs, attr_len, bgp_linpool, nlri_len);
+  // Flag to indicate whether the AS path is loopy or not - see bgp_decode_attrs()
+  int loopy_path;
+
+  // Decodes the BGP attributes from the update message
+  // Aside from decoding attributes, this function also performs the loop detection
+  // using the bgp_as_path_loopy() function
+  a0 = bgp_decode_attrs(conn, attrs, attr_len, bgp_linpool, nlri_len, &loopy_path);
 
   if (conn->state != BS_ESTABLISHED)	/* fatal error during decoding */
     return;
@@ -1237,16 +1289,54 @@ bgp_do_rx_update(struct bgp_conn *conn,
   last_id = 0;
   src = p->p.main_source;
 
+  // An update message may refer to multiple prefixes
+  // Here we loop through each prefix and update the route table for each prefix
   while (nlri_len)
-    {
-      DECODE_PREFIX(nlri, nlri_len);
-      DBG("Add %I/%d\n", prefix, pxlen);
+  {
+    DECODE_PREFIX(nlri, nlri_len);
+    DBG("Add %I/%d\n", prefix, pxlen);
 
-      if (a0)
-	bgp_rte_update(p, prefix, pxlen, path_id, &last_id, &src, a0, &a);
-      else /* Forced withdraw as a result of soft error */
-	bgp_rte_withdraw(p, prefix, pxlen, path_id, &last_id, &src);
+    struct prefix pref = {prefix, pxlen};
+    if (prefix_set_contains(p->deactivated_prefixes, &pref)) {
+      BGP_TRACE(D_PACKETS, "DEACTIVATION Discarded update for %I/%d\n", prefix, pxlen);
+      continue;
     }
+
+    BGP_TRACE(D_PACKETS, "DEACTIVATION prefix %I/%d is ok\n", prefix, pxlen);
+
+    if (a0)
+      bgp_rte_update(p, prefix, pxlen, path_id, &last_id, &src, a0, &a);
+    else /* Forced withdraw as a result of soft error */
+    {
+      if (!loopy_path) 
+      {
+        bgp_rte_withdraw(p, prefix, pxlen, path_id, &last_id, &src);
+      }
+      else
+      {
+        net *n = net_find(p->p.table, prefix, pxlen);
+        // Get the local-pref of the elected route before the withdraw
+        u32 old_local_pref = bgp_find_local_pref(p, n->routes);
+
+        bgp_rte_withdraw(p, prefix, pxlen, path_id, &last_id, &src);
+        
+        // Get the local-pref of the elected route after the withdraw
+        u32 new_local_pref = bgp_find_local_pref(p, n->routes);
+
+        BGP_TRACE(D_PACKETS, "DETECTION old LOCAL-PREF %d", old_local_pref);
+        BGP_TRACE(D_PACKETS, "DETECTION new LOCAL-PREF %d", new_local_pref);
+
+        if (bgp_is_loop_recurrent(old_local_pref, new_local_pref)) 
+        {
+          BGP_TRACE(D_PACKETS, "DETECTION Detected recurrent loop");
+          
+          prefix_set_add(p->deactivated_prefixes, &pref);
+          BGP_TRACE(D_PACKETS, "DEACTIVATION Deactivated prefix %I/%d\n", prefix, pxlen);
+        }
+
+      }
+    }
+  }
 
  done:
   if (a)
@@ -1312,7 +1402,10 @@ bgp_do_rx_update(struct bgp_conn *conn,
 
   p->mp_reach_len = 0;
   p->mp_unreach_len = 0;
-  a0 = bgp_decode_attrs(conn, attrs, attr_len, bgp_linpool, 0);
+
+  // !!! IPv6 version !!!
+  int loopy_path;
+  a0 = bgp_decode_attrs(conn, attrs, attr_len, bgp_linpool, 0, &loopy_path);
 
   if (conn->state != BS_ESTABLISHED)	/* fatal error during decoding */
     return;

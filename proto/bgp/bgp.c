@@ -1305,6 +1305,7 @@ bgp_init(struct proto_config *C)
   p->rs_client = c->rs_client;
   p->rr_client = c->rr_client;
   p->igp_table = get_igp_table(c);
+  p->deactivated_prefixes = prefix_set_new();
 
   return P;
 }
